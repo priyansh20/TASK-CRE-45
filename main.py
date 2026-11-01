@@ -23,3 +23,28 @@ gdf = gdf.to_crs(epsg=25832)
 gdf['geometry'] = gdf['geometry'].apply(lambda geom: make_valid(geom) if not geom.is_valid else geom)
 gdf = gdf[~gdf['geometry'].is_empty & gdf['geometry'].is_valid]
 logging.info(f"{len(gdf)} valid geometries prepared for database insertion.")
+
+
+engine = create_engine(os.environ.get("DB_URI"))
+
+# Write to a temporary table first
+gdf.to_postgis(
+    name='temp_zensus_grid',
+    con=engine,
+    schema='iris_staging',
+    if_exists='replace',
+    index=False
+)
+
+# Perform the idempotent upsert to the final staging table
+upsert_query = text("""
+    INSERT INTO iris_staging.socio_demographics_staging (grid_id, population, year, geometry)
+    SELECT grid_id, population, 2022, geometry FROM iris_staging.temp_zensus_grid
+    ON CONFLICT (grid_id) DO UPDATE SET
+        population = EXCLUDED.population,
+        geometry = EXCLUDED.geometry;
+""")
+
+with engine.begin() as conn:
+    conn.execute(upsert_query)
+    logging.info("Idempotent upsert to iris_staging.socio_demographics_staging complete.")
